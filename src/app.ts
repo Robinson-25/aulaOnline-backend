@@ -11,6 +11,7 @@ import { q, UPLOAD_DIR, type Row } from './db.ts';
 import { type User, HttpError, fail, signUser, publicUser, loadUser, requireAuth, signMedia, readMedia, limit } from './auth.ts';
 import { SITE, PUBLIC_URL, randomCode, courseProgress, ensureCertificate, certificatePdf } from './cert.ts';
 import { sendMail, mailConfigured } from './mail.ts';
+import { store } from './storage.ts';
 import adminRoutes from './admin.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -161,7 +162,8 @@ const voucherUpload = multer({
 }).single('voucher');
 
 app.post('/api/orders', requireAuth, voucherUpload, async (req, res) => {
-  const drop = () => req.file && fs.unlink(req.file.path, () => {});
+  let stored = false;
+  const drop = () => req.file && !stored && fs.unlink(req.file.path, () => {});
   try {
     const course = (await q.get('SELECT * FROM courses WHERE id=? AND published=1', Number(req.body.courseId)));
     if (!course) fail(404, 'Este curso no está disponible.');
@@ -178,10 +180,13 @@ app.post('/api/orders', requireAuth, voucherUpload, async (req, res) => {
       if (!paymentMethods().some((m) => m.id === method)) fail(400, 'Selecciona un método de pago disponible.');
       if (ref.length < 4 && !req.file) fail(400, 'Ingresa el número de operación o adjunta tu comprobante de pago.');
     }
+    // El comprobante se guarda solo cuando el pedido ya pasó todas las validaciones.
+    let voucher: string | null = null;
+    if (!free && req.file) { voucher = (await store(req.file.path, 'vouchers')).ref; stored = true; }
     let code: string;
     do code = randomCode('PED', 7); while ((await q.get('SELECT 1 FROM orders WHERE code=?', code)));
     const id = (await q.run('INSERT INTO orders (code,user_id,course_id,price,discount,total,coupon_code,method,operation_ref,voucher) VALUES (?,?,?,?,?,?,?,?,?,?)',
-      code, req.user.id, course.id, course.price, discount, total, coupon?.code, method, ref || null, !free && req.file ? `vouchers/${req.file.filename}` : null)).lastInsertRowid;
+      code, req.user.id, course.id, course.price, discount, total, coupon?.code, method, ref || null, voucher)).lastInsertRowid;
     const order = (await q.get('SELECT * FROM orders WHERE id=?', id));
     if (free) { drop(); (await approveOrder(order)); } // sin cobro: no hay pago que confirmar
     else sendMail(req.user.email, `Recibimos tu pedido ${code} — ${SITE}`, `Hola ${req.user.name}:\n\nRegistramos tu pedido ${code} del curso "${course.title}" por S/ ${total.toFixed(2)}.\nEstado: pendiente de verificación. Te avisaremos cuando confirmemos tu pago.\n\n${SITE}`);

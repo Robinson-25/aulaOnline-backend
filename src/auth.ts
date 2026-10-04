@@ -1,6 +1,7 @@
 import jwt from 'jsonwebtoken';
 import type { NextFunction, Request, Response } from 'express';
 import { q } from './db.ts';
+import { cloudUrl } from './storage.ts';
 
 export interface User { id: number; name: string; email: string; password_hash: string; role: 'estudiante' | 'admin'; phone: string | null }
 declare global { namespace Express { interface Request { user?: User | null } } }
@@ -27,7 +28,8 @@ export const requireAdmin = async (req: Request, _res: Response, next: NextFunct
   !req.user ? next(new HttpError(401, 'Inicia sesión para continuar.')) : req.user.role !== 'admin' ? next(new HttpError(403, 'No tienes permiso para esta sección.')) : next();
 
 // Enlaces firmados y temporales para archivos privados (videos, comprobantes).
-export const signMedia = (file: string | null | undefined): string | null => (file ? `/api/media?f=${encodeURIComponent(jwt.sign({ f: file }, SECRET, { expiresIn: '12h' }))}` : null);
+export const signMedia = (file: string | null | undefined): string | null =>
+  !file ? null : file.startsWith('cld:') ? cloudUrl(file) : `/api/media?f=${encodeURIComponent(jwt.sign({ f: file }, SECRET, { expiresIn: '12h' }))}`;
 export const readMedia = (token: string): string | null => { try { return (jwt.verify(token, SECRET) as { f: string }).f; } catch { return null; } };
 
 // Límite simple de intentos (protege ingreso y recuperación de contraseña).

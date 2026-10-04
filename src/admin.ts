@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import { q, slugify, UPLOAD_DIR, type Row } from './db.ts';
 import { HttpError, fail, requireAdmin, signMedia } from './auth.ts';
 import { courseProgress } from './cert.ts';
+import { store, removeMedia, isCloudRef, VIDEO_MAX_MB, type Kind } from './storage.ts';
 import { approveOrder, courseOut } from './app.ts';
 import { sendMail } from './mail.ts';
 
@@ -32,7 +33,7 @@ r.get('/summary', async (_req, res) => {
 // ----- subida de archivos -----
 const KINDS: Record<string, { dir: string; max: number; ok: RegExp; msg: string }> = {
   image: { dir: 'images', max: 8, ok: /\.(jpe?g|png|webp|gif|svg)$/i, msg: 'Sube una imagen JPG, PNG o WEBP.' },
-  video: { dir: 'videos', max: 2048, ok: /\.(mp4|webm|mov|m4v)$/i, msg: 'Sube un video MP4 o WEBM.' },
+  video: { dir: 'videos', max: VIDEO_MAX_MB, ok: /\.(mp4|webm|mov|m4v)$/i, msg: 'Sube un video MP4 o WEBM.' },
   file: { dir: 'files', max: 50, ok: /\.(pdf|docx?|xlsx?|pptx?|zip|txt|csv|png|jpe?g)$/i, msg: 'Tipo de archivo no permitido (usa PDF, Word, Excel, PowerPoint, ZIP o imagen).' },
 };
 r.post('/upload/:kind', async (req, res, next) => {
@@ -42,11 +43,17 @@ r.post('/upload/:kind', async (req, res, next) => {
     storage: multer.diskStorage({ destination: path.join(UPLOAD_DIR, k.dir), filename: (_q, f, cb) => cb(null, crypto.randomBytes(12).toString('hex') + path.extname(f.originalname).toLowerCase()) }),
     limits: { fileSize: k.max * 1024 * 1024 },
     fileFilter: (_q, f, cb) => (k.ok.test(f.originalname) ? cb(null, true) : cb(new HttpError(400, k.msg))),
-  }).single('file')(req, res, (err) => {
-    if (err) return next(err);
+  }).single('file')(req, res, async (err) => {
+    if (err) return next(err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE' ? new HttpError(400, `El archivo supera el máximo permitido (${k.max} MB).`) : err);
     if (!req.file) return next(new HttpError(400, 'No se recibió ningún archivo.'));
-    const name = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
-    res.json(req.params.kind === 'video' ? { path: `videos/${req.file.filename}`, name, preview: signMedia(`videos/${req.file.filename}`) } : { url: `/uploads/${k.dir}/${req.file.filename}`, name });
+    try {
+      const name = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
+      const saved = await store(req.file.path, k.dir as Kind);
+      res.json(req.params.kind === 'video' ? { path: saved.ref, name, preview: signMedia(saved.ref) } : { url: saved.url, name });
+    } catch (e) {
+      console.error('Error al guardar el archivo:', e);
+      next(new HttpError(502, 'No se pudo guardar el archivo. Inténtalo de nuevo.'));
+    }
   });
 });
 
@@ -107,7 +114,7 @@ r.put('/courses/:id', async (req, res) => {
 r.delete('/courses/:id', async (req, res) => {
   if ((await q.get('SELECT 1 FROM enrollments WHERE course_id=? UNION SELECT 1 FROM orders WHERE course_id=?', id(req), id(req))))
     fail(400, 'Este curso ya tiene estudiantes o compras. Para retirarlo del catálogo, ocúltalo en lugar de eliminarlo.');
-  for (const l of (await q.all("SELECT video_url FROM lessons WHERE course_id=? AND video_kind='file'", id(req)))) fs.unlink(path.join(UPLOAD_DIR, l.video_url), () => {});
+  for (const l of (await q.all("SELECT video_url FROM lessons WHERE course_id=? AND video_kind='file'", id(req)))) removeMedia(l.video_url);
   (await q.run('DELETE FROM courses WHERE id=?', id(req))); res.json({ ok: true });
 });
 
@@ -133,7 +140,7 @@ async function saveLesson(b: Row, lessonId: number | null, mod?: Row): Promise<v
   const title = str(b.title, 150); if (!title) fail(400, 'Escribe el título de la lección.');
   const type = ['video', 'texto', 'cuestionario'].includes(b.type) ? b.type : 'video';
   const vkind = b.video_url ? (b.video_kind === 'file' ? 'file' : 'enlace') : null;
-  if (vkind === 'file' && !/^videos\/[a-f0-9]+\.\w+$/.test(b.video_url)) fail(400, 'El video subido no es válido.');
+  if (vkind === 'file' && !/^videos\/[a-f0-9]+\.\w+$/.test(b.video_url) && !isCloudRef(b.video_url)) fail(400, 'El video subido no es válido.');
   if (vkind === 'enlace' && !/^https:\/\//.test(b.video_url)) fail(400, 'El enlace del video debe empezar con https://');
   const resources = JSON.stringify((b.resources || []).filter((x: Row) => x?.name && /^(\/uploads\/files\/|https:\/\/)/.test(x.url)).map((x: Row) => ({ name: str(x.name, 120), url: str(x.url, 500) })).slice(0, 20));
   const qs = type === 'cuestionario' ? (b.questions || []).map((x: Row) => ({ text: str(x.text, 500), options: (x.options || []).map((o: unknown) => str(o, 300)).filter(Boolean), correct: Number(x.correct_index) })) : [];
@@ -150,12 +157,12 @@ r.post('/modules/:id/lessons', async (req, res) => { const m = (await q.get('SEL
 r.put('/lessons/:id', async (req, res) => {
   const old = (await q.get('SELECT * FROM lessons WHERE id=?', id(req))); if (!old) fail(404, 'Lección no encontrada.');
   (await saveLesson(req.body, old.id));
-  if (old.video_kind === 'file' && old.video_url !== req.body.video_url) fs.unlink(path.join(UPLOAD_DIR, old.video_url), () => {});
+  if (old.video_kind === 'file' && old.video_url !== req.body.video_url) removeMedia(old.video_url);
   res.json({ ok: true });
 });
 r.delete('/lessons/:id', async (req, res) => {
   const old = (await q.get('SELECT * FROM lessons WHERE id=?', id(req)));
-  if (old?.video_kind === 'file') fs.unlink(path.join(UPLOAD_DIR, old.video_url), () => {});
+  if (old?.video_kind === 'file') removeMedia(old.video_url);
   (await q.run('DELETE FROM lessons WHERE id=?', id(req))); res.json({ ok: true });
 });
 
