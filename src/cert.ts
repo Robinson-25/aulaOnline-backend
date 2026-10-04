@@ -10,29 +10,29 @@ export const PUBLIC_URL = (process.env.PUBLIC_URL || 'http://localhost:5173').re
 const ABC = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 export const randomCode = (prefix: string, n = 10): string => `${prefix}-${Array.from(crypto.randomBytes(n), (b) => ABC[b % ABC.length]).join('')}`;
 
-export function courseProgress(userId: number, courseId: number): { total: number; done: number; percent: number } {
-  const total = q.get('SELECT COUNT(*) n FROM lessons WHERE course_id=?', courseId).n;
-  const done = q.get("SELECT COUNT(*) n FROM progress p JOIN lessons l ON l.id=p.lesson_id WHERE p.user_id=? AND l.course_id=? AND p.status='completada'", userId, courseId).n;
+export async function courseProgress(userId: number, courseId: number): Promise<{ total: number; done: number; percent: number }> {
+  const total = (await q.get('SELECT COUNT(*) n FROM lessons WHERE course_id=?', courseId)).n;
+  const done = (await q.get("SELECT COUNT(*) n FROM progress p JOIN lessons l ON l.id=p.lesson_id WHERE p.user_id=? AND l.course_id=? AND p.status='completada'", userId, courseId)).n;
   return { total, done, percent: total ? Math.round((done / total) * 100) : 0 };
 }
 
 // Emite el certificado solo si todas las lecciones (incluidos los cuestionarios aprobados) están completas.
-export function ensureCertificate(user: User, courseId: number): Row | null {
-  const course = q.get('SELECT has_certificate FROM courses WHERE id=?', courseId);
-  const existing = q.get('SELECT * FROM certificates WHERE user_id=? AND course_id=?', user.id, courseId);
+export async function ensureCertificate(user: User, courseId: number): Promise<Row | null> {
+  const course = (await q.get('SELECT has_certificate FROM courses WHERE id=?', courseId));
+  const existing = (await q.get('SELECT * FROM certificates WHERE user_id=? AND course_id=?', user.id, courseId));
   if (existing || !course?.has_certificate) return existing || null;
-  const p = courseProgress(user.id, courseId);
+  const p = (await courseProgress(user.id, courseId));
   if (!p.total || p.done < p.total) return null;
   let code: string;
-  do code = randomCode('APO'); while (q.get('SELECT 1 FROM certificates WHERE code=?', code));
-  q.run('INSERT INTO certificates (code,user_id,course_id,student_name) VALUES (?,?,?,?)', code, user.id, courseId, user.name);
-  return q.get('SELECT * FROM certificates WHERE code=?', code) ?? null;
+  do code = randomCode('APO'); while ((await q.get('SELECT 1 FROM certificates WHERE code=?', code)));
+  (await q.run('INSERT INTO certificates (code,user_id,course_id,student_name) VALUES (?,?,?,?)', code, user.id, courseId, user.name));
+  return (await q.get('SELECT * FROM certificates WHERE code=?', code)) ?? null;
 }
 
 export const fmtDate = (s: string): string => new Date(s.replace(' ', 'T') + 'Z').toLocaleDateString('es-PE', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'America/Lima' });
 
 export async function certificatePdf(cert: Row, res: Response): Promise<void> {
-  const course = q.get('SELECT title, instructor, duration_hours FROM courses WHERE id=?', cert.course_id);
+  const course = (await q.get('SELECT title, instructor, duration_hours FROM courses WHERE id=?', cert.course_id));
   const url = `${PUBLIC_URL}/verificar/${cert.code}`;
   const qr = await QRCode.toBuffer(url, { margin: 1, width: 300, color: { dark: '#00275B' } });
   const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 0 });

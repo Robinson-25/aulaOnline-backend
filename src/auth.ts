@@ -17,13 +17,13 @@ export const fail = (status: number, msg: string): never => { throw new HttpErro
 export const signUser = (u: { id: number }) => jwt.sign({ id: u.id }, SECRET, { expiresIn: '7d' });
 export const publicUser = (u: User) => ({ id: u.id, name: u.name, email: u.email, role: u.role, phone: u.phone || '' });
 
-export function loadUser(req: Request, _res: Response, next: NextFunction) {
+export async function loadUser(req: Request, _res: Response, next: NextFunction) {
   const m = /^Bearer (.+)$/.exec(req.headers.authorization || '');
-  if (m) try { req.user = (q.get('SELECT * FROM users WHERE id=?', (jwt.verify(m[1], SECRET) as { id: number }).id) as User) || null; } catch { /* token inválido */ }
+  if (m) try { req.user = ((await q.get('SELECT * FROM users WHERE id=?', (jwt.verify(m[1], SECRET) as { id: number }).id)) as User) || null; } catch { /* token inválido */ }
   next();
 }
-export const requireAuth = (req: Request, _res: Response, next: NextFunction) => (req.user ? next() : next(new HttpError(401, 'Inicia sesión para continuar.')));
-export const requireAdmin = (req: Request, _res: Response, next: NextFunction) =>
+export const requireAuth = async (req: Request, _res: Response, next: NextFunction) => (req.user ? next() : next(new HttpError(401, 'Inicia sesión para continuar.')));
+export const requireAdmin = async (req: Request, _res: Response, next: NextFunction) =>
   !req.user ? next(new HttpError(401, 'Inicia sesión para continuar.')) : req.user.role !== 'admin' ? next(new HttpError(403, 'No tienes permiso para esta sección.')) : next();
 
 // Enlaces firmados y temporales para archivos privados (videos, comprobantes).
@@ -32,7 +32,7 @@ export const readMedia = (token: string): string | null => { try { return (jwt.v
 
 // Límite simple de intentos (protege ingreso y recuperación de contraseña).
 const hits = new Map<string, number[]>();
-export const limit = (max: number, minutes: number) => (req: Request, _res: Response, next: NextFunction) => {
+export const limit = (max: number, minutes: number) => async (req: Request, _res: Response, next: NextFunction) => {
   const key = req.ip + req.path, now = Date.now();
   const list = (hits.get(key) || []).filter((t) => now - t < minutes * 60000);
   list.push(now); hits.set(key, list);
