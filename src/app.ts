@@ -12,6 +12,7 @@ import { type User, HttpError, fail, signUser, publicUser, loadUser, requireAuth
 import { SITE, PUBLIC_URL, randomCode, courseProgress, ensureCertificate, certificatePdf } from './cert.ts';
 import { sendMail, mailConfigured } from './mail.ts';
 import { store } from './storage.ts';
+import { events, notifyChanges } from './live.ts';
 import adminRoutes from './admin.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -26,6 +27,8 @@ app.use('/img', express.static(path.join(here, '..', 'public', 'img'), { maxAge:
 app.use('/uploads/images', express.static(path.join(UPLOAD_DIR, 'images'), { maxAge: '7d' }));
 app.use('/uploads/files', express.static(path.join(UPLOAD_DIR, 'files')));
 app.use(loadUser);
+app.get('/api/events', events);
+app.use('/api', notifyChanges);
 
 // ---------- utilidades ----------
 const str = (v: unknown, max = 5000): string => String(v ?? '').trim().slice(0, max);

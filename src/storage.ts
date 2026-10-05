@@ -65,6 +65,7 @@ export const isCloudRef = (ref: unknown): boolean => typeof ref === 'string' && 
 /** Enlace firmado para ver un archivo privado de Cloudinary (o null si la referencia es local). */
 export function cloudUrl(ref: string): string | null {
   const p = parse(ref);
+  if (!cloud) return null; // referencia de Cloudinary, pero las claves no están configuradas
   return p ? cloudinary.url(p.public_id, { resource_type: p.resource_type, type: 'authenticated', sign_url: true, secure: true, format: p.format }) : null;
 }
 
