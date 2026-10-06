@@ -223,8 +223,9 @@ app.get('/api/learn/:slug', requireAuth, async (req, res) => {
   const lessons = (await q.all('SELECT id,module_id,title,type,duration_min FROM lessons WHERE course_id=? ORDER BY position,id', c.id)).map((l) => ({ ...l, status: st[l.id] || 'pendiente' }));
   const modules = (await q.all('SELECT id,title FROM modules WHERE course_id=? ORDER BY position,id', c.id)).map((m) => ({ ...m, lessons: lessons.filter((l) => l.module_id === m.id) }));
   const en = (await q.get('SELECT last_lesson_id FROM enrollments WHERE user_id=? AND course_id=?', req.user.id, c.id));
+  const cert = (await ensureCertificate(req.user, c.id)); // lo emite si ya completó todo (por ejemplo, si se quitó una lección del curso)
   res.json({ ...c, modules, progress: (await courseProgress(req.user.id, c.id)), last_lesson_id: en?.last_lesson_id || null,
-    certificate: (await q.get('SELECT code,revoked FROM certificates WHERE user_id=? AND course_id=?', req.user.id, c.id)) || null,
+    certificate: cert ? { code: cert.code, revoked: cert.revoked } : null,
     myReview: (await q.get('SELECT rating,comment FROM reviews WHERE user_id=? AND course_id=?', req.user.id, c.id)) || null });
 });
 

@@ -4,6 +4,7 @@ import multer from 'multer';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs';
+import bcrypt from 'bcryptjs';
 import { q, slugify, UPLOAD_DIR, type Row } from './db.ts';
 import { HttpError, fail, requireAdmin, signMedia } from './auth.ts';
 import { courseProgress } from './cert.ts';
@@ -189,9 +190,36 @@ r.get('/students', async (_req, res) => {
   for (const u of users) {
     const courses = [];
     for (const e of en.filter((x) => x.user_id === u.id)) courses.push({ course_id: e.course_id, title: e.title, percent: (await courseProgress(u.id, e.course_id)).percent });
-    out.push({ ...u, courses });
+    const extra = (await q.get('SELECT (SELECT COUNT(*) FROM orders WHERE user_id=?) orders, (SELECT COUNT(*) FROM certificates WHERE user_id=?) certificates', u.id, u.id));
+    out.push({ ...u, courses, orders: extra.orders, certificates: extra.certificates });
   }
   res.json(out);
+});
+// Edita los datos de un estudiante. La contraseña solo cambia si se escribe una nueva.
+r.put('/students/:id', async (req, res) => {
+  const u = (await q.get('SELECT id, role FROM users WHERE id=?', id(req))); if (!u) fail(404, 'Estudiante no encontrado.');
+  if (u.role !== 'estudiante') fail(400, 'Solo se pueden editar cuentas de estudiantes.');
+  const name = str(req.body.name, 100), email = str(req.body.email, 150).toLowerCase(), phone = str(req.body.phone, 30) || null, password = String(req.body.password || '');
+  if (name.length < 3) fail(400, 'Escribe el nombre completo.');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fail(400, 'Escribe un correo válido.');
+  if ((await q.get('SELECT 1 FROM users WHERE email=? AND id<>?', email, u.id))) fail(400, 'Ya existe otra cuenta con ese correo.');
+  if (password && password.length < 8) fail(400, 'La nueva contraseña debe tener al menos 8 caracteres.');
+  await q.run('UPDATE users SET name=?, email=?, phone=? WHERE id=?', name, email, phone, u.id);
+  if (password) await q.run('UPDATE users SET password_hash=? WHERE id=?', bcrypt.hashSync(password, 10), u.id);
+  res.json({ ok: true });
+});
+// Elimina la cuenta de un estudiante con todo lo suyo (matrículas, avance, preguntas, reseñas, compras y certificados).
+r.delete('/students/:id', async (req, res) => {
+  const u = (await q.get('SELECT id, role FROM users WHERE id=?', id(req))); if (!u) fail(404, 'Estudiante no encontrado.');
+  if (u.role !== 'estudiante') fail(400, 'Solo se pueden eliminar cuentas de estudiantes.');
+  const vouchers = (await q.all('SELECT voucher FROM orders WHERE user_id=? AND voucher IS NOT NULL', u.id));
+  await q.tx(async () => {
+    await q.run('DELETE FROM certificates WHERE user_id=?', u.id);
+    await q.run('DELETE FROM orders WHERE user_id=?', u.id);
+    await q.run('DELETE FROM users WHERE id=?', u.id); // lo demás se borra en cascada
+  });
+  for (const v of vouchers) removeMedia(v.voucher);
+  res.json({ ok: true });
 });
 r.post('/enroll', async (req, res) => {
   const u = (await q.get('SELECT id FROM users WHERE email=?', str(req.body.email, 150).toLowerCase())); if (!u) fail(404, 'No hay una cuenta registrada con ese correo.');
